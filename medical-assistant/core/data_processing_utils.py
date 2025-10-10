@@ -12,7 +12,7 @@ def extract_text_from_PDF(filepath: str) -> str:
                 text += page.get_text()
         return text
     except Exception as e:
-        print(f"Ошибка при извлечении текста из файла {filepath}: {e}")
+        print(f"Error while extracting file {filepath}: {e}")
         return ""
 
 
