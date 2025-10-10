@@ -16,7 +16,7 @@ def extract_text_from_PDF(filepath: str) -> str:
         return ""
 
 
-def split_text_into_chunks(text: str, source: str, chunk_size: int = 400, chunk_overlap: int = 50) -> List[Dict]:
+def split_text_into_chunks(text: str, source: str, chunk_size: int = 1000, chunk_overlap: int = 50) -> List[Dict]:
     text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
