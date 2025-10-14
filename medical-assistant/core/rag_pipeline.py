@@ -93,6 +93,26 @@ class RAGPipeline:
             Question: {question}
 
             Answer (in {language}) please:
+
+            At the end of your response, include this disclaimer:
+            "⚠️ This information is not a substitute for professional medical advice. Always consult a healthcare provider."
+            """
+        )
+    
+    def _create_fallback_prompt(self) -> PromptTemplate:
+        "Creating promt template if no context provided"
+        return PromptTemplate.from_template(
+            """
+            You are a helpful medical assistant.
+            The system could not find any relevant documents,
+            So please answer the following question using your general knowledge.
+            
+            Question: {question}
+
+            Answer (in {language}) please:
+
+            At the end of your response, include this disclaimer:
+            "⚠️ This information is not a substitute for professional medical advice. Always consult a healthcare provider."
             """
         )
     
