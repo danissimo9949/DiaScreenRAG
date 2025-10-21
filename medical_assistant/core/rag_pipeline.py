@@ -1,4 +1,8 @@
 import os
+import time
+import psutil
+from datetime import datetime
+from typing import Dict, Any, Optional
 from dotenv import load_dotenv
 from langchain_community.vectorstores import Chroma
 from langchain_community.embeddings import SentenceTransformerEmbeddings
@@ -132,6 +136,159 @@ class RAGPipeline:
         if self.debug:
             print(f"\n🧠 Контекст, переданный в LLM:\n{context}...\n")
         return response
+    
+    def health_check(self) -> Dict[str, Any]:
+        """
+        Проверяет состояние всех компонентов системы
+        """
+        health_status = {
+            "vector_database": self._check_vector_database(),
+            "llm_service": self._check_llm_service(),
+            "embedding_model": self._check_embedding_model(),
+            "performance": self._get_performance_metrics(),
+            "configuration": self._get_configuration_info()
+        }
+        
+        # Определяем общий статус
+        all_up = all(
+            component["status"] == "up" 
+            for component in health_status.values() 
+            if isinstance(component, dict) and "status" in component
+        )
+        
+        health_status["overall_status"] = "healthy" if all_up else "unhealthy"
+        health_status["timestamp"] = datetime.now().isoformat()
+        
+        return health_status
+    
+    def _check_vector_database(self) -> Dict[str, Any]:
+        """Проверяет состояние векторной базы данных"""
+        try:
+            # Проверяем существование директории
+            if not os.path.exists(self.vector_db_path):
+                return {
+                    "status": "down",
+                    "message": f"Vector database directory not found: {self.vector_db_path}",
+                    "details": {"path": self.vector_db_path}
+                }
+            
+            # Проверяем подключение к ChromaDB
+            test_query = self.vector_store.similarity_search("test", k=1)
+            
+            # Получаем информацию о базе данных
+            db_info = self.vector_store.get()
+            documents_count = len(db_info['ids']) if db_info['ids'] else 0
+            
+            # Получаем размер директории
+            db_size = self._get_directory_size(self.vector_db_path)
+            
+            return {
+                "status": "up",
+                "message": "Vector database is accessible",
+                "details": {
+                    "documents_count": documents_count,
+                    "database_size_mb": round(db_size / (1024 * 1024), 2),
+                    "path": self.vector_db_path
+                }
+            }
+            
+        except Exception as e:
+            return {
+                "status": "down",
+                "message": f"Vector database error: {str(e)}",
+                "details": {"error": str(e)}
+            }
+    
+    def _check_llm_service(self) -> Dict[str, Any]:
+        """Проверяет состояние LLM сервиса"""
+        try:
+            # Простой тестовый запрос
+            start_time = time.time()
+            test_response = self.llm.invoke("Hello")
+            response_time = time.time() - start_time
+            
+            return {
+                "status": "up",
+                "message": "LLM service is accessible",
+                "details": {
+                    "model": "models/gemini-2.5-pro",
+                    "response_time_seconds": round(response_time, 2),
+                    "test_response_length": len(str(test_response))
+                }
+            }
+            
+        except Exception as e:
+            return {
+                "status": "down",
+                "message": f"LLM service error: {str(e)}",
+                "details": {"error": str(e)}
+            }
+    
+    def _check_embedding_model(self) -> Dict[str, Any]:
+        """Проверяет состояние embedding модели"""
+        try:
+            # Тестовое создание эмбеддинга
+            start_time = time.time()
+            test_embedding = self.embedding_model.embed_query("test")
+            embedding_time = time.time() - start_time
+            
+            return {
+                "status": "up",
+                "message": "Embedding model is loaded and working",
+                "details": {
+                    "model": "intfloat/multilingual-e5-large",
+                    "embedding_dimensions": len(test_embedding),
+                    "embedding_time_seconds": round(embedding_time, 3)
+                }
+            }
+            
+        except Exception as e:
+            return {
+                "status": "down",
+                "message": f"Embedding model error: {str(e)}",
+                "details": {"error": str(e)}
+            }
+    
+    def _get_performance_metrics(self) -> Dict[str, Any]:
+        """Получает метрики производительности"""
+        try:
+            # Получаем информацию о системе
+            memory = psutil.virtual_memory()
+            cpu_percent = psutil.cpu_percent(interval=1)
+            
+            return {
+                "memory_usage_mb": round(memory.used / (1024 * 1024), 2),
+                "memory_percent": memory.percent,
+                "cpu_percent": cpu_percent,
+                "available_memory_mb": round(memory.available / (1024 * 1024), 2)
+            }
+            
+        except Exception as e:
+            return {
+                "error": f"Failed to get performance metrics: {str(e)}"
+            }
+    
+    def _get_configuration_info(self) -> Dict[str, Any]:
+        """Получает информацию о конфигурации"""
+        return {
+            "relevance_threshold": self.relevance_threshold,
+            "language": self.language,
+            "debug_mode": self.debug,
+            "vector_db_path": self.vector_db_path
+        }
+    
+    def _get_directory_size(self, path: str) -> int:
+        """Вычисляет размер директории в байтах"""
+        total_size = 0
+        try:
+            for dirpath, dirnames, filenames in os.walk(path):
+                for filename in filenames:
+                    filepath = os.path.join(dirpath, filename)
+                    if os.path.exists(filepath):
+                        total_size += os.path.getsize(filepath)
+        except Exception:
+            pass
+        return total_size
 
 
 if __name__ == "__main__":
@@ -140,7 +297,7 @@ if __name__ == "__main__":
         vector_db_folder = os.path.join(base_dir, "data", "vector_db") 
         rag_system = RAGPipeline(vector_db_path=vector_db_folder, debug=True, relevance_threshold=0.35)
         
-        user_question = "Explain main symptoms of diabetes."
+        user_question = "Who is Gamash, you know?"
         print(f"Question: {user_question}")
         answer = rag_system.query(user_question)
         print(f"Answer: {answer}")
