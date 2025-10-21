@@ -30,7 +30,7 @@ class RAGPipeline:
         self.vector_db_path = vector_db_path
         self.language = language
         self.debug = debug
-        self.relevance_threshold = relevance_threshold  # Порог: подберите под ваши embeddings (0.5-0.7 типично)
+        self.relevance_threshold = relevance_threshold
         self.embedding_model = self._load_embedding_model(model_name)
         self.vector_store = self._load_vector_store()
         self.llm = self._load_llm(llm_model)
@@ -64,17 +64,15 @@ class RAGPipeline:
 
         if not relevant_docs or context.strip() == "No relevant context found.":
             prompt = self._create_fallback_prompt()
-            context = ""  # Без контекста для fallback
+            context = ""
         else:
             prompt = self._create_prompt()
 
         return self._generate_answer(prompt, context, user_question)
     
     def _retrieve_context(self, question: str, k: int):
-        # Изменено: используем similarity_search_with_score для получения score
         docs_with_scores = self.vector_store.similarity_search_with_score(question, k=k)
         
-        # Фильтруем по релевантности: score - это distance (меньше = лучше)
         relevant_docs = [doc for doc, score in docs_with_scores if score <= self.relevance_threshold]
         
         if self.debug:
@@ -82,7 +80,7 @@ class RAGPipeline:
             for i, (doc, score) in enumerate(docs_with_scores):
                 print(f"Doc {i+1} score: {score:.4f} (relevant: {score <= self.relevance_threshold})")
         
-        return relevant_docs  # Возвращаем только релевантные документы
+        return relevant_docs
     
     def _combine_context(self, docs) -> str:
         if not docs:
@@ -91,42 +89,54 @@ class RAGPipeline:
     
     def _create_prompt(self) -> PromptTemplate:
         return PromptTemplate.from_template(
-            """
-            You are a helpful medical assistant. You must only answer questions related to medicine, health and diabetus mellitus.
+            """You are a medical AI assistant specializing in diabetes mellitus. Your goal is to provide accurate, evidence-based information to patients and healthcare providers.
 
-            Use the following context to answer the question as accurately as possible.
-            If the context does not contain enough information to give a complete or confident answer,
-            you may use your own medical knowledge to fill in the missing details.
-            However, always prioritize and clearly reference the information found in the provided context.
-            Also, do not mention or refer to any "provided context" or "background information" in your answer.
-            Simply answer as if you already know these facts
+Context from medical literature:
+{context}
 
-            Context:
-            {context}
+Patient question: {question}
 
-            Question: {question}
+Instructions for your response:
+1. **If the context fully answers the question**: Provide a confident, detailed answer based on the medical literature
+2. **If the context is incomplete**: Start with "Based on available information and general medical knowledge:" and explain what you know
+3. **If the context is not relevant**: Start with "I don't have specific information in my database about this, but based on general medical knowledge:"
+4. **Use simple language**: Explain medical terms when you use them
+5. **Be structured**: Use bullet points or sections for complex topics
+6. **Be empathetic**: Use a supportive, professional tone
 
-            Answer (in {language}) please, in a natural and professional tone:
+Answer in {language}:
 
-            At the end of your response, include this disclaimer:
-            "⚠️ This information is not a substitute for professional medical advice. Always consult a healthcare provider."
-            """
+---
+
+Key takeaways:
+• [Main point 1]
+• [Main point 2]
+• [Main point 3 if applicable]
+
+⚠️ This information is educational and not a substitute for professional medical advice. Always consult your healthcare provider for personalized guidance.
+"""
         )
     
     def _create_fallback_prompt(self) -> PromptTemplate:
         return PromptTemplate.from_template(
-            """
-            You are a helpful medical assistant. You must only answer questions related to medicine, health and diabetus mellitus.
-            The system could not find any relevant documents,
-            So please answer the following question using your general knowledge.
-            
-            Question: {question}
+            """You are a medical AI assistant specializing in diabetes mellitus.
 
-            Answer (in {language}) please:
+⚠️ Note: No relevant information was found in the medical database for this question.
 
-            At the end of your response, include this disclaimer:
-            "⚠️ This information is not a substitute for professional medical advice. Always consult a healthcare provider."
-            """
+Question: {question}
+
+Instructions:
+- Answer ONLY if the question is related to medicine, health, or diabetes mellitus
+- If the question is unrelated to these topics, politely decline and suggest asking a diabetes-related question
+- Start your answer with: "I don't have specific information in my database, but based on general medical knowledge:"
+- Use simple language in {language}
+- Be transparent about limitations
+- Keep the answer concise but helpful
+
+Your answer:
+
+⚠️ This information is based on general medical knowledge and not a substitute for professional medical advice. Please consult your healthcare provider.
+"""
         )
     
     def _generate_answer(self, prompt_template, context: str, question: str) -> str:
@@ -138,9 +148,6 @@ class RAGPipeline:
         return response
     
     def health_check(self) -> Dict[str, Any]:
-        """
-        Проверяет состояние всех компонентов системы
-        """
         health_status = {
             "vector_database": self._check_vector_database(),
             "llm_service": self._check_llm_service(),
@@ -149,7 +156,6 @@ class RAGPipeline:
             "configuration": self._get_configuration_info()
         }
         
-        # Определяем общий статус
         all_up = all(
             component["status"] == "up" 
             for component in health_status.values() 
@@ -162,9 +168,7 @@ class RAGPipeline:
         return health_status
     
     def _check_vector_database(self) -> Dict[str, Any]:
-        """Проверяет состояние векторной базы данных"""
         try:
-            # Проверяем существование директории
             if not os.path.exists(self.vector_db_path):
                 return {
                     "status": "down",
@@ -172,14 +176,11 @@ class RAGPipeline:
                     "details": {"path": self.vector_db_path}
                 }
             
-            # Проверяем подключение к ChromaDB
             test_query = self.vector_store.similarity_search("test", k=1)
             
-            # Получаем информацию о базе данных
             db_info = self.vector_store.get()
             documents_count = len(db_info['ids']) if db_info['ids'] else 0
             
-            # Получаем размер директории
             db_size = self._get_directory_size(self.vector_db_path)
             
             return {
@@ -202,7 +203,6 @@ class RAGPipeline:
     def _check_llm_service(self) -> Dict[str, Any]:
         """Проверяет состояние LLM сервиса"""
         try:
-            # Простой тестовый запрос
             start_time = time.time()
             test_response = self.llm.invoke("Hello")
             response_time = time.time() - start_time
@@ -227,7 +227,6 @@ class RAGPipeline:
     def _check_embedding_model(self) -> Dict[str, Any]:
         """Проверяет состояние embedding модели"""
         try:
-            # Тестовое создание эмбеддинга
             start_time = time.time()
             test_embedding = self.embedding_model.embed_query("test")
             embedding_time = time.time() - start_time
@@ -252,7 +251,6 @@ class RAGPipeline:
     def _get_performance_metrics(self) -> Dict[str, Any]:
         """Получает метрики производительности"""
         try:
-            # Получаем информацию о системе
             memory = psutil.virtual_memory()
             cpu_percent = psutil.cpu_percent(interval=1)
             
@@ -269,7 +267,6 @@ class RAGPipeline:
             }
     
     def _get_configuration_info(self) -> Dict[str, Any]:
-        """Получает информацию о конфигурации"""
         return {
             "relevance_threshold": self.relevance_threshold,
             "language": self.language,
@@ -278,7 +275,6 @@ class RAGPipeline:
         }
     
     def _get_directory_size(self, path: str) -> int:
-        """Вычисляет размер директории в байтах"""
         total_size = 0
         try:
             for dirpath, dirnames, filenames in os.walk(path):
