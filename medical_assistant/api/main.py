@@ -1,14 +1,15 @@
 from typing import Union
 from datetime import datetime
 import logging
-from fastapi import FastAPI, HTTPException
+import os
+import json
+from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.responses import JSONResponse
 from medical_assistant.core.rag_pipeline import RAGPipeline
+from medical_assistant.core.data_processing_utils import extract_text_from_PDF, split_text_into_chunks
+from medical_assistant.core.embeddings import create_vector_store
 from medical_assistant.api.models import HealthResponse, SimpleHealthResponse, HealthStatus, ComponentStatus, ComponentHealth
 
-import os
-
-# Настройка логирования
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -27,6 +28,93 @@ try:
 except Exception as e:
     logger.error(f"Failed to initialize RAG pipeline: {e}")
     raise
+
+def add_documents_to_vector_store(chunks: list, vector_db_path: str):
+    
+    from langchain_community.vectorstores import Chroma
+    from langchain_community.embeddings import SentenceTransformerEmbeddings
+    from langchain_core.documents import Document
+    
+    try:
+        embedding_function = SentenceTransformerEmbeddings(
+            model_name="intfloat/multilingual-e5-large"
+        )
+        
+        new_documents = []
+        for chunk in chunks:
+            new_documents.append(Document(
+                page_content=chunk['text'],
+                metadata={"source": chunk['source'], "id": chunk['id']}
+            ))
+        
+        if os.path.exists(vector_db_path):
+            logger.info(f"Loading existing vector database from {vector_db_path}")
+            vector_store = Chroma(
+                persist_directory=vector_db_path,
+                embedding_function=embedding_function
+            )
+            vector_store.add_documents(new_documents)
+            logger.info(f"Added {len(new_documents)} new documents to existing database")
+        else:
+            logger.info(f"Creating new vector database at {vector_db_path}")
+            vector_store = Chroma.from_documents(
+                documents=new_documents,
+                embedding=embedding_function,
+                persist_directory=vector_db_path
+            )
+            logger.info(f"Created new database with {len(new_documents)} documents")
+        
+        vector_store.persist()
+        logger.info("Vector database saved successfully")
+        
+        return True
+        
+    except Exception as e:
+        logger.error(f"Error updating vector database: {e}")
+        return False
+
+def process_single_pdf(file_path: str, filename: str):
+    try:
+        logger.info(f"Processing PDF file: {filename}")
+
+        processed_file = os.path.join(base_dir, "data", "processed", "processed_pdfs.json")
+        all_chunks = []
+
+        if os.path.exists(processed_file):
+            with open(processed_file, 'r', encoding='utf-8') as f:
+                all_chunks = json.load(f)
+                
+            existing_filenames = {chunk["source"] for chunk in all_chunks if "source" in chunk}
+            if filename in existing_filenames:
+                logger.info(f"⚠️ Файл {filename} уже обработан — пропускаем")
+                return False
+
+        text = extract_text_from_PDF(file_path)
+        if not text:
+            logger.error(f"No text extracted from {filename}")
+            return False
+
+        chunks = split_text_into_chunks(text, filename)
+        logger.info(f"Created {len(chunks)} chunks from {filename}")
+
+        all_chunks.extend(chunks)
+
+        with open(processed_file, 'w', encoding='utf-8') as f:
+            json.dump(all_chunks, f, ensure_ascii=False, indent=4)
+
+        vector_db_folder = os.path.join(base_dir, "data", "vector_db")
+        success = add_documents_to_vector_store(chunks, vector_db_folder)
+        
+        if success:
+            logger.info(f"Successfully added {filename} to vector database")
+            return True
+        else:
+            logger.error(f"Failed to add {filename} to vector database")
+            return False
+
+    except Exception as e:
+        logger.error(f"Error processing {filename}: {e}")
+        return False
 
 # Get response from LLM on user question
 @app.get("/get-response")
@@ -67,7 +155,6 @@ def health_check():
         logger.info("Performing comprehensive health check")
         health_data = rag_pipeline.health_check()
         
-        # Преобразуем данные в формат модели
         components = {}
         overall_status = HealthStatus.HEALTHY
         
@@ -121,7 +208,6 @@ def readiness_probe():
     """
     try:
         logger.debug("Performing readiness probe")
-        # Быстрая проверка основных компонентов
         health_data = rag_pipeline.health_check()
         
         if health_data.get("overall_status") == "healthy":
@@ -156,7 +242,6 @@ def detailed_health_check():
         logger.info("Performing detailed health check")
         health_data = rag_pipeline.health_check()
         
-        # Добавляем дополнительную информацию
         detailed_info = {
             **health_data,
             "system_info": {
@@ -180,4 +265,47 @@ def detailed_health_check():
         raise HTTPException(
             status_code=500,
             detail=f"Detailed health check failed: {str(e)}"
+        )
+
+@app.post("/documents/upload")
+async def upload_document(file: UploadFile = File(...)):
+   
+    try:
+        logger.info(f"Uploading document: {file.filename}")
+        
+        if not file.filename.lower().endswith('.pdf'):
+            raise HTTPException(
+                status_code=400,
+                detail="Only PDF files are supported"
+            )
+        
+        raw_dir = os.path.join(base_dir, "data", "raw")
+        os.makedirs(raw_dir, exist_ok=True)
+        
+        file_path = os.path.join(raw_dir, file.filename)
+        with open(file_path, "wb") as buffer:
+            content = await file.read()
+            buffer.write(content)
+        
+        success = process_single_pdf(file_path, file.filename)
+        
+        if success:
+            return {
+                "message": f"Document {file.filename} uploaded and processed successfully",
+                "filename": file.filename,
+                "status": "success"
+            }
+        else:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to process document {file.filename}"
+            )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error uploading document {file.filename}: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to upload document: {str(e)}"
         )
