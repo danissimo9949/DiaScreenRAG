@@ -309,3 +309,22 @@ async def upload_document(file: UploadFile = File(...)):
             status_code=500,
             detail=f"Failed to upload document: {str(e)}"
         )
+
+
+@app.post("/cache/clear")
+def clear_cache():
+    try:
+        logger.info("Clearing cache")
+        cleared_items = rag_pipeline.clear_cache()
+        logger.info(f"Cache cleared: {cleared_items} items removed")
+        return {
+            "message": "Cache cleared successfully",
+            "cleared_items": cleared_items,
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error clearing cache: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to clear cache: {str(e)}"
+        )

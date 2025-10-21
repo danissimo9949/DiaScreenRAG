@@ -1,3 +1,4 @@
+import hashlib
 import os
 import time
 import psutil
@@ -26,8 +27,11 @@ class RAGPipeline:
         language: str = "en",
         debug: bool = False,
         relevance_threshold: float = 0.3,
+        enable_cache: bool = True,
     ):
         self.vector_db_path = vector_db_path
+        self.enable_cache = enable_cache
+        self.cache = {} if enable_cache else None
         self.language = language
         self.debug = debug
         self.relevance_threshold = relevance_threshold
@@ -57,8 +61,48 @@ class RAGPipeline:
         if self.debug:
             print(f"Load documents with Chroma: {len(vector_store.get()['ids'])}")
         return vector_store
+
+    def _get_cache_key(self, question: str) -> str:
+        return hashlib.md5(question.lower().strip().encode()).hexdigest()
+    
+    def clear_cache(self):
+        """Очищает весь кеш"""
+        if self.enable_cache and self.cache:
+            cache_size = len(self.cache)
+            self.cache.clear()
+            if self.debug:
+                print(f"🗑️ Cache cleared. {cache_size} items removed.")
+            return cache_size
+        return 0
+    
+    def get_cache_stats(self) -> Dict[str, Any]:
+        """Получает статистику кеша"""
+        if not self.enable_cache or self.cache is None:
+            return {
+                "enabled": False,
+                "size": 0,
+                "items": 0
+            }
+        
+        # Вычисляем примерный размер кеша в байтах
+        cache_size_bytes = sum(len(str(v).encode('utf-8')) for v in self.cache.values())
+        
+        return {
+            "enabled": True,
+            "items": len(self.cache),
+            "size_kb": round(cache_size_bytes / 1024, 2),
+            "size_mb": round(cache_size_bytes / (1024 * 1024), 2)
+        }
     
     def query(self, user_question: str, k: int = 4) -> str:
+
+        if self.enable_cache:
+            cache_key = self._get_cache_key(user_question)
+            if cache_key in self.cache:
+                if self.debug:
+                    print(f"Cache hit for question: {user_question}")
+                return self.cache[cache_key]
+        
         relevant_docs = self._retrieve_context(user_question, k)
         context = self._combine_context(relevant_docs)
 
@@ -68,7 +112,14 @@ class RAGPipeline:
         else:
             prompt = self._create_prompt()
 
-        return self._generate_answer(prompt, context, user_question)
+        answer = self._generate_answer(prompt, context, user_question)
+        
+        if self.enable_cache:
+            self.cache[cache_key] = answer
+            if self.debug:
+                print(f"💾 Answer cached. Total cached items: {len(self.cache)}")
+        
+        return answer
     
     def _retrieve_context(self, question: str, k: int):
         docs_with_scores = self.vector_store.similarity_search_with_score(question, k=k)
@@ -153,6 +204,7 @@ Your answer:
             "llm_service": self._check_llm_service(),
             "embedding_model": self._check_embedding_model(),
             "performance": self._get_performance_metrics(),
+            "cache": self.get_cache_stats(),
             "configuration": self._get_configuration_info()
         }
         
@@ -271,6 +323,7 @@ Your answer:
             "relevance_threshold": self.relevance_threshold,
             "language": self.language,
             "debug_mode": self.debug,
+            "cache_enabled": self.enable_cache,
             "vector_db_path": self.vector_db_path
         }
     
