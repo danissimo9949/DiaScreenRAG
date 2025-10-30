@@ -126,9 +126,7 @@ def process_single_pdf(file_path: str, filename: str):
 @app.get("/get-response")
 @limiter.limit("2/minute")
 def get_response_from_LLM(question: str):
-    """
-    Получить ответ от медицинского ассистента на вопрос пользователя
-    """
+   
     try:
         logger.info(f"Received question: {question[:100]}...")
         
@@ -136,6 +134,12 @@ def get_response_from_LLM(question: str):
             raise HTTPException(
                 status_code=400,
                 detail="Question cannot be empty"
+            )
+        
+        if len(question) > 2000:
+            raise HTTPException(
+                status_code=400,
+                detail="Question is too long. Maximum 2000 characters."
             )
         
         answer = rag_pipeline.query(question)
@@ -335,3 +339,11 @@ def clear_cache():
             status_code=500,
             detail=f"Failed to clear cache: {str(e)}"
         )
+
+@app.get("/version")
+def get_version():
+    return {
+        "version": "1.0.0",
+        "api_name": "DiaScreenRAG Medical Assistant",
+        "language": rag_pipeline.language
+    }
