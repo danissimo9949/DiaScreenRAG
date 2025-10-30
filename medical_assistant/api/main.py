@@ -3,6 +3,9 @@ from datetime import datetime
 import logging
 import os
 import json
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.responses import JSONResponse
 from medical_assistant.core.rag_pipeline import RAGPipeline
@@ -16,9 +19,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+limiter = Limiter(key_func=get_remote_address)
 app = FastAPI()
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-# Initialize RAG on server start
+
 try:
     base_dir = os.getcwd()
     vector_db_folder = os.path.join(base_dir, "data", "vector_db")
@@ -116,8 +122,9 @@ def process_single_pdf(file_path: str, filename: str):
         logger.error(f"Error processing {filename}: {e}")
         return False
 
-# Get response from LLM on user question
+
 @app.get("/get-response")
+@limiter.limit("2/minute")
 def get_response_from_LLM(question: str):
     """
     Получить ответ от медицинского ассистента на вопрос пользователя
