@@ -8,6 +8,7 @@ from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.responses import JSONResponse
+from fastapi import Request
 from medical_assistant.core.rag_pipeline import RAGPipeline
 from medical_assistant.core.data_processing_utils import extract_text_from_PDF, split_text_into_chunks
 from medical_assistant.core.embeddings import create_vector_store
@@ -125,7 +126,7 @@ def process_single_pdf(file_path: str, filename: str):
 
 @app.get("/get-response")
 @limiter.limit("2/minute")
-def get_response_from_LLM(question: str):
+def get_response_from_LLM(request: Request, question: str):
    
     try:
         logger.info(f"Received question: {question[:100]}...")
@@ -142,10 +143,10 @@ def get_response_from_LLM(question: str):
                 detail="Question is too long. Maximum 2000 characters."
             )
         
-        answer = rag_pipeline.query(question)
-        logger.info(f"Successfully generated answer for question")
+        result = rag_pipeline.query(question)
+        logger.info("Successfully generated answer for question")
         
-        return {"answer": answer}
+        return result
         
     except HTTPException:
         raise

@@ -1,9 +1,10 @@
 import hashlib
 import os
 import time
+from copy import deepcopy
 import psutil
 from datetime import datetime
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List
 from dotenv import load_dotenv
 from langchain_community.vectorstores import Chroma
 from langchain_community.embeddings import SentenceTransformerEmbeddings
@@ -47,7 +48,11 @@ class RAGPipeline:
         api_key = os.getenv("GEMINI_API_KEY")
         if not api_key:
             raise ValueError("API key didn't exist")
-        return ChatGoogleGenerativeAI(model=model_name, google_api_key=api_key)
+        return ChatGoogleGenerativeAI(
+            model=model_name,
+            google_api_key=api_key,
+            max_retries=1,
+        )
 
     def _load_vector_store(self):
         if not os.path.exists(self.vector_db_path):
@@ -94,37 +99,72 @@ class RAGPipeline:
             "size_mb": round(cache_size_bytes / (1024 * 1024), 2)
         }
     
-    def query(self, user_question: str, k: int = 4) -> str:
+    def query(self, user_question: str, k: int = 4) -> Dict[str, Any]:
+        start_time = time.time()
 
+        cache_key = None
         if self.enable_cache:
             cache_key = self._get_cache_key(user_question)
-            if cache_key in self.cache:
+            cached_result = self.cache.get(cache_key)
+            if cached_result is not None:
                 if self.debug:
                     print(f"Cache hit for question: {user_question}")
-                return self.cache[cache_key]
+                cached_copy = deepcopy(cached_result)
+                metadata = cached_copy.setdefault("metadata", {})
+                metadata["cache_hit"] = True
+                metadata.setdefault("response_time_ms", 0)
+                metadata.setdefault("retrieved_documents", len(cached_copy.get("sources", [])))
+                metadata.setdefault("relevance_threshold", self.relevance_threshold)
+                metadata.setdefault("language", self.language)
+                return cached_copy
         
         relevant_docs = self._retrieve_context(user_question, k)
         context = self._combine_context(relevant_docs)
 
         if not relevant_docs or context.strip() == "No relevant context found.":
             prompt = self._create_fallback_prompt()
+            prompt_type = "fallback"
             context = ""
         else:
             prompt = self._create_prompt()
+            prompt_type = "standard"
 
         answer = self._generate_answer(prompt, context, user_question)
+        response_time_ms = round((time.time() - start_time) * 1000)
+
+        sources = self._format_sources(relevant_docs)
+        metadata = {
+            "cache_hit": False,
+            "response_time_ms": response_time_ms,
+            "retrieved_documents": len(sources),
+            "relevance_threshold": self.relevance_threshold,
+            "language": self.language,
+            "prompt_type": prompt_type,
+        }
+
+        result = {
+            "answer": answer,
+            "sources": sources,
+            "metadata": metadata,
+        }
         
-        if self.enable_cache:
-            self.cache[cache_key] = answer
+        if self.enable_cache and cache_key is not None:
+            self.cache[cache_key] = deepcopy(result)
             if self.debug:
                 print(f"💾 Answer cached. Total cached items: {len(self.cache)}")
         
-        return answer
+        return result
     
-    def _retrieve_context(self, question: str, k: int):
+    def _retrieve_context(self, question: str, k: int) -> List[Dict[str, Any]]:
         docs_with_scores = self.vector_store.similarity_search_with_score(question, k=k)
         
-        relevant_docs = [doc for doc, score in docs_with_scores if score <= self.relevance_threshold]
+        relevant_docs = []
+        for doc, score in docs_with_scores:
+            if score <= self.relevance_threshold:
+                relevant_docs.append({
+                    "document": doc,
+                    "score": score
+                })
         
         if self.debug:
             print(f"\nRetrieved {len(docs_with_scores)} docs, but after filtering by threshold {self.relevance_threshold}: {len(relevant_docs)} relevant")
@@ -133,10 +173,28 @@ class RAGPipeline:
         
         return relevant_docs
     
-    def _combine_context(self, docs) -> str:
+    def _combine_context(self, docs: List[Dict[str, Any]]) -> str:
         if not docs:
             return "No relevant context found."
-        return "\n".join(doc.page_content for doc in docs)
+        return "\n".join(entry["document"].page_content for entry in docs)
+
+    def _format_sources(self, docs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        seen_ids = set()
+        sources = []
+        for entry in docs:
+            doc = entry["document"]
+            score = entry["score"]
+            metadata = doc.metadata or {}
+            source_id = metadata.get("id") or metadata.get("source")
+            if source_id in seen_ids:
+                continue
+            seen_ids.add(source_id)
+            sources.append({
+                "id": metadata.get("id"),
+                "source": metadata.get("source"),
+                "score": score,
+            })
+        return sources
     
     def _create_prompt(self) -> PromptTemplate:
         return PromptTemplate.from_template(
