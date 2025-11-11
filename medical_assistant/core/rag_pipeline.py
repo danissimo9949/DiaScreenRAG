@@ -4,7 +4,7 @@ import time
 from copy import deepcopy
 import psutil
 from datetime import datetime
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional, Tuple
 from dotenv import load_dotenv
 from langchain_community.vectorstores import Chroma
 from langchain_community.embeddings import SentenceTransformerEmbeddings
@@ -99,12 +99,27 @@ class RAGPipeline:
             "size_mb": round(cache_size_bytes / (1024 * 1024), 2)
         }
     
-    def query(self, user_question: str, k: int = 4) -> Dict[str, Any]:
+    def query(
+        self,
+        user_question: str,
+        k: int = 4,
+        language: Optional[str] = None,
+        extra_context: Optional[str] = None,
+    ) -> Dict[str, Any]:
         start_time = time.time()
+        response_language = language or self.language
+        extra_context_clean = extra_context.strip() if extra_context else None
+        context_hash = (
+            hashlib.md5(extra_context_clean.encode("utf-8")).hexdigest()
+            if extra_context_clean
+            else ""
+        )
 
         cache_key = None
         if self.enable_cache:
-            cache_key = self._get_cache_key(user_question)
+            cache_key = self._get_cache_key(
+                f"{response_language}:{user_question}:{context_hash}"
+            )
             cached_result = self.cache.get(cache_key)
             if cached_result is not None:
                 if self.debug:
@@ -115,21 +130,24 @@ class RAGPipeline:
                 metadata.setdefault("response_time_ms", 0)
                 metadata.setdefault("retrieved_documents", len(cached_copy.get("sources", [])))
                 metadata.setdefault("relevance_threshold", self.relevance_threshold)
-                metadata.setdefault("language", self.language)
+                metadata.setdefault("language", response_language)
+                metadata.setdefault("personal_context_included", bool(extra_context_clean))
                 return cached_copy
         
         relevant_docs = self._retrieve_context(user_question, k)
-        context = self._combine_context(relevant_docs)
+        documents_context = self._combine_context(relevant_docs)
+        context, has_document_context = self._build_context(
+            documents_context, extra_context_clean
+        )
 
-        if not relevant_docs or context.strip() == "No relevant context found.":
+        if not has_document_context and not extra_context_clean:
             prompt = self._create_fallback_prompt()
             prompt_type = "fallback"
-            context = ""
         else:
             prompt = self._create_prompt()
             prompt_type = "standard"
 
-        answer = self._generate_answer(prompt, context, user_question)
+        answer = self._generate_answer(prompt, context, user_question, response_language)
         response_time_ms = round((time.time() - start_time) * 1000)
 
         sources = self._format_sources(relevant_docs)
@@ -138,9 +156,13 @@ class RAGPipeline:
             "response_time_ms": response_time_ms,
             "retrieved_documents": len(sources),
             "relevance_threshold": self.relevance_threshold,
-            "language": self.language,
+            "language": response_language,
             "prompt_type": prompt_type,
+            "personal_context_included": bool(extra_context_clean),
+            "context_hash": context_hash if extra_context_clean else None,
         }
+        if extra_context_clean:
+            metadata["personal_context_length"] = len(extra_context_clean)
 
         result = {
             "answer": answer,
@@ -178,6 +200,27 @@ class RAGPipeline:
             return "No relevant context found."
         return "\n".join(entry["document"].page_content for entry in docs)
 
+    def _build_context(
+        self,
+        documents_context: Optional[str],
+        extra_context: Optional[str],
+    ) -> Tuple[str, bool]:
+        segments: List[str] = []
+        has_document_context = bool(
+            documents_context and documents_context.strip() != "No relevant context found."
+        )
+
+        if extra_context:
+            segments.append(f"Patient context:\n{extra_context}")
+
+        if has_document_context:
+            segments.append(f"Medical literature context:\n{documents_context}")
+
+        if not segments:
+            return "No relevant context found.", False
+
+        return "\n\n".join(segments), has_document_context
+
     def _format_sources(self, docs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         seen_ids = set()
         sources = []
@@ -200,18 +243,22 @@ class RAGPipeline:
         return PromptTemplate.from_template(
             """You are a medical AI assistant specializing in diabetes mellitus. Your goal is to provide accurate, evidence-based information to patients and healthcare providers.
 
-Context from medical literature:
+Context below may include two sections:
+1. Patient background (if available): personalized data about the individual asking the question.
+2. Medical literature context: excerpts from evidence-based sources.
+
+Combined context:
 {context}
 
 Patient question: {question}
 
 Instructions for your response:
-1. **If the context fully answers the question**: Provide a confident, detailed answer based on the medical literature
-2. **If the context is incomplete**: Start with "Based on available information and general medical knowledge:" and explain what you know
-3. **If the context is not relevant**: Start with "I don't have specific information in my database about this, but based on general medical knowledge:"
-4. **Use simple language**: Explain medical terms when you use them
-5. **Be structured**: Use bullet points or sections for complex topics
-6. **Be empathetic**: Use a supportive, professional tone
+1. If patient background is present, use it to tailor the advice but never invent new personal details.
+2. If the medical literature context fully addresses the question, provide a confident, detailed answer referencing that information.
+3. If the context is incomplete, start with "Based on available information and general medical knowledge:" and explain what you know.
+4. If the context is not relevant, start with "I don't have specific information in my database about this, but based on general medical knowledge:".
+5. Use simple language, explain medical terms, and maintain a supportive, professional tone.
+6. Do not restate or expose sensitive personal information beyond what is necessary to answer the question.
 
 Answer in {language}:
 
@@ -248,9 +295,9 @@ Your answer:
 """
         )
     
-    def _generate_answer(self, prompt_template, context: str, question: str) -> str:
+    def _generate_answer(self, prompt_template, context: str, question: str, language: str) -> str:
         chain = prompt_template | self.llm | StrOutputParser()
-        response = chain.invoke({"context": context, "question": question, "language": self.language})
+        response = chain.invoke({"context": context, "question": question, "language": language})
         
         if self.debug:
             print(f"\n🧠 Контекст, переданный в LLM:\n{context}...\n")

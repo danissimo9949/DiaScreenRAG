@@ -1,4 +1,4 @@
-from typing import Union
+from typing import Union, Tuple
 from datetime import datetime
 import logging
 import os
@@ -9,16 +9,37 @@ from slowapi.errors import RateLimitExceeded
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.responses import JSONResponse
 from fastapi import Request
+from langdetect import detect, DetectorFactory, LangDetectException
 from medical_assistant.core.rag_pipeline import RAGPipeline
 from medical_assistant.core.data_processing_utils import extract_text_from_PDF, split_text_into_chunks
 from medical_assistant.core.embeddings import create_vector_store
-from medical_assistant.api.models import HealthResponse, SimpleHealthResponse, HealthStatus, ComponentStatus, ComponentHealth
+from medical_assistant.api.models import (
+    HealthResponse,
+    SimpleHealthResponse,
+    HealthStatus,
+    ComponentStatus,
+    ComponentHealth,
+    PersonalizedQueryRequest,
+)
 
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+DetectorFactory.seed = 0
+
+DEFAULT_LANGUAGE_CODE = "en"
+LANGUAGE_MAPPING = {
+    "en": "English",
+    "ru": "Russian",
+    "uk": "Ukrainian",
+    "pl": "Polish",
+    "es": "Spanish",
+    "de": "German",
+    "fr": "French",
+}
 
 limiter = Limiter(key_func=get_remote_address)
 app = FastAPI()
@@ -124,6 +145,16 @@ def process_single_pdf(file_path: str, filename: str):
         return False
 
 
+def detect_prompt_language(text: str) -> Tuple[str, str]:
+    try:
+        language_code = detect(text)
+    except LangDetectException:
+        language_code = DEFAULT_LANGUAGE_CODE
+
+    prompt_language = LANGUAGE_MAPPING.get(language_code, LANGUAGE_MAPPING[DEFAULT_LANGUAGE_CODE])
+    return language_code, prompt_language
+
+
 @app.get("/get-response")
 @limiter.limit("2/minute")
 def get_response_from_LLM(request: Request, question: str):
@@ -143,7 +174,24 @@ def get_response_from_LLM(request: Request, question: str):
                 detail="Question is too long. Maximum 2000 characters."
             )
         
-        result = rag_pipeline.query(question)
+        extra_context = request.query_params.get("context")
+        extra_context = extra_context.strip() if extra_context else None
+        mode = request.query_params.get("mode") or (
+            "personalized" if extra_context else "standard"
+        )
+
+        detected_code, prompt_language = detect_prompt_language(question)
+        result = rag_pipeline.query(
+            question,
+            language=prompt_language,
+            extra_context=extra_context,
+        )
+        metadata = result.setdefault("metadata", {})
+        metadata["detected_language_code"] = detected_code
+        metadata["prompt_language"] = prompt_language
+        metadata["mode"] = mode
+        metadata.setdefault("personal_context_included", bool(extra_context))
+        
         logger.info("Successfully generated answer for question")
         
         return result
@@ -152,6 +200,60 @@ def get_response_from_LLM(request: Request, question: str):
         raise
     except Exception as e:
         logger.error(f"Error processing question '{question}': {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Internal server error: {str(e)}"
+        )
+
+
+@app.post("/get-response/personalized")
+@limiter.limit("2/minute")
+def get_personalized_response(request: Request, payload: PersonalizedQueryRequest):
+    try:
+        question = (payload.question or "").strip()
+        if not question:
+            raise HTTPException(
+                status_code=400,
+                detail="Question cannot be empty"
+            )
+        if len(question) > 2000:
+            raise HTTPException(
+                status_code=400,
+                detail="Question is too long. Maximum 2000 characters."
+            )
+
+        personal_context = (payload.context or "").strip()
+        if not personal_context:
+            raise HTTPException(
+                status_code=400,
+                detail="Personal context cannot be empty when using the personalized endpoint."
+            )
+
+        detected_code, prompt_language = detect_prompt_language(question)
+        if payload.language:
+            prompt_language = payload.language
+
+        result = rag_pipeline.query(
+            question,
+            language=prompt_language,
+            extra_context=personal_context,
+        )
+        metadata = result.setdefault("metadata", {})
+        metadata["detected_language_code"] = detected_code
+        metadata["prompt_language"] = prompt_language
+        metadata["mode"] = payload.mode or "personalized"
+        metadata["personal_context_included"] = True
+        metadata["personal_context_length"] = len(personal_context)
+        metadata["client_language_override"] = bool(payload.language)
+
+        logger.info("Successfully generated personalized answer for question")
+
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error processing personalized question '{payload.question}': {str(e)}")
         raise HTTPException(
             status_code=500,
             detail=f"Internal server error: {str(e)}"
