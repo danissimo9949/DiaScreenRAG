@@ -156,7 +156,6 @@ def detect_prompt_language(text: str) -> Tuple[str, str]:
 
 
 @app.get("/get-response")
-@limiter.limit("2/minute")
 def get_response_from_LLM(request: Request, question: str):
    
     try:
@@ -176,6 +175,24 @@ def get_response_from_LLM(request: Request, question: str):
         
         extra_context = request.query_params.get("context")
         extra_context = extra_context.strip() if extra_context else None
+        
+        original_context_length = len(extra_context) if extra_context else 0
+        context_was_truncated = False
+        
+        if extra_context:
+            MAX_CONTEXT_LENGTH = 3000
+            if len(extra_context) > MAX_CONTEXT_LENGTH:
+                logger.warning(
+                    f"Context in GET request too long ({len(extra_context)} > {MAX_CONTEXT_LENGTH} chars). "
+                    f"Truncating."
+                )
+                context_was_truncated = True
+                original_context_length = len(extra_context)
+                extra_context = extra_context[-MAX_CONTEXT_LENGTH:]
+                first_newline = extra_context.find('\n')
+                if first_newline > 0 and first_newline < 100:
+                    extra_context = extra_context[first_newline + 1:]
+        
         mode = request.query_params.get("mode") or (
             "personalized" if extra_context else "standard"
         )
@@ -191,6 +208,10 @@ def get_response_from_LLM(request: Request, question: str):
         metadata["prompt_language"] = prompt_language
         metadata["mode"] = mode
         metadata.setdefault("personal_context_included", bool(extra_context))
+        if context_was_truncated and extra_context:
+            metadata["personal_context_truncated"] = True
+            metadata["original_context_length"] = original_context_length
+            metadata["max_context_length"] = 3000
         
         logger.info("Successfully generated answer for question")
         
@@ -228,6 +249,21 @@ def get_personalized_response(request: Request, payload: PersonalizedQueryReques
                 status_code=400,
                 detail="Personal context cannot be empty when using the personalized endpoint."
             )
+        
+        MAX_CONTEXT_LENGTH = 3000
+        original_context_length = len(personal_context)
+        context_was_truncated = False
+        
+        if len(personal_context) > MAX_CONTEXT_LENGTH:
+            logger.warning(
+                f"Personal context too long ({len(personal_context)} > {MAX_CONTEXT_LENGTH} chars). "
+                f"Truncating to last {MAX_CONTEXT_LENGTH} characters."
+            )
+            context_was_truncated = True
+            personal_context = personal_context[-MAX_CONTEXT_LENGTH:]
+            first_newline = personal_context.find('\n')
+            if first_newline > 0 and first_newline < 100:
+                personal_context = personal_context[first_newline + 1:]
 
         detected_code, prompt_language = detect_prompt_language(question)
         if payload.language:
@@ -244,6 +280,10 @@ def get_personalized_response(request: Request, payload: PersonalizedQueryReques
         metadata["mode"] = payload.mode or "personalized"
         metadata["personal_context_included"] = True
         metadata["personal_context_length"] = len(personal_context)
+        if context_was_truncated:
+            metadata["personal_context_truncated"] = True
+            metadata["original_context_length"] = original_context_length
+            metadata["max_context_length"] = MAX_CONTEXT_LENGTH
         metadata["client_language_override"] = bool(payload.language)
 
         logger.info("Successfully generated personalized answer for question")

@@ -13,18 +13,12 @@ from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
 class RAGPipeline:
-    """
-    Retrieval-Augmented Generation (RAG) Pipeline:
-    1. Извлекает релевантные документы из Chroma.
-    2. Формирует промпт.
-    3. Отправляет его в LLM (Google Gemini).
-    """
 
     def __init__(
         self,
         vector_db_path: str,
         model_name: str = "intfloat/multilingual-e5-large",
-        llm_model: str = "models/gemini-2.5-pro",
+        llm_model: str = "models/gemini-2.5-flash",
         language: str = "en",
         debug: bool = False,
         relevance_threshold: float = 0.3,
@@ -71,7 +65,6 @@ class RAGPipeline:
         return hashlib.md5(question.lower().strip().encode()).hexdigest()
     
     def clear_cache(self):
-        """Очищает весь кеш"""
         if self.enable_cache and self.cache:
             cache_size = len(self.cache)
             self.cache.clear()
@@ -81,7 +74,6 @@ class RAGPipeline:
         return 0
     
     def get_cache_stats(self) -> Dict[str, Any]:
-        """Получает статистику кеша"""
         if not self.enable_cache or self.cache is None:
             return {
                 "enabled": False,
@@ -89,7 +81,6 @@ class RAGPipeline:
                 "items": 0
             }
         
-        # Вычисляем примерный размер кеша в байтах
         cache_size_bytes = sum(len(str(v).encode('utf-8')) for v in self.cache.values())
         
         return {
@@ -109,6 +100,19 @@ class RAGPipeline:
         start_time = time.time()
         response_language = language or self.language
         extra_context_clean = extra_context.strip() if extra_context else None
+        
+        MAX_EXTRA_CONTEXT_LENGTH = 3500
+        context_was_truncated = False
+        original_context_length = len(extra_context_clean) if extra_context_clean else 0
+        
+        if extra_context_clean and len(extra_context_clean) > MAX_EXTRA_CONTEXT_LENGTH:
+            if self.debug:
+                print(f"⚠️ Extra context too long ({len(extra_context_clean)} chars), truncating to {MAX_EXTRA_CONTEXT_LENGTH}")
+            context_was_truncated = True
+            extra_context_clean = extra_context_clean[-MAX_EXTRA_CONTEXT_LENGTH:]
+            first_newline = extra_context_clean.find('\n')
+            if first_newline > 0 and first_newline < 100:
+                extra_context_clean = extra_context_clean[first_newline + 1:]
         context_hash = (
             hashlib.md5(extra_context_clean.encode("utf-8")).hexdigest()
             if extra_context_clean
@@ -163,6 +167,10 @@ class RAGPipeline:
         }
         if extra_context_clean:
             metadata["personal_context_length"] = len(extra_context_clean)
+            if context_was_truncated:
+                metadata["personal_context_truncated"] = True
+                metadata["original_context_length"] = original_context_length
+                metadata["max_context_length"] = MAX_EXTRA_CONTEXT_LENGTH
 
         result = {
             "answer": answer,
@@ -406,7 +414,6 @@ Your answer:
             }
     
     def _get_performance_metrics(self) -> Dict[str, Any]:
-        """Получает метрики производительности"""
         try:
             memory = psutil.virtual_memory()
             cpu_percent = psutil.cpu_percent(interval=1)
